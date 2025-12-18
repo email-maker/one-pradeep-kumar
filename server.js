@@ -3,55 +3,60 @@ const session = require("express-session");
 const nodemailer = require("nodemailer");
 const bodyParser = require("body-parser");
 const path = require("path");
-const crypto = require("crypto");
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-/* LOGIN (UPDATED) */
-const LOGIN_ID = "pradeepkumar882";
-const LOGIN_PASS = "pradeepkumar882";
+/* ===== LOGIN ===== */
+const LOGIN_ID = "yatendrakumar882";
+const LOGIN_PASS = "yatendrakumar882";
 
-/* MIDDLEWARE */
+/* ===== MIDDLEWARE ===== */
 app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname, "public")));
+
 app.use(
   session({
-    secret: "clean-safe-session",
+    secret: "fast-clean-session",
     resave: false,
     saveUninitialized: true,
     cookie: { maxAge: 60 * 60 * 1000 }
   })
 );
 
+/* ===== AUTH ===== */
 function auth(req, res, next) {
   if (req.session.user) return next();
   return res.redirect("/");
 }
 
-/* LOGIN / LOGOUT */
+/* ===== LOGIN ===== */
 app.post("/login", (req, res) => {
-  if (req.body.username === LOGIN_ID && req.body.password === LOGIN_PASS) {
+  const { username, password } = req.body;
+  if (username === LOGIN_ID && password === LOGIN_PASS) {
     req.session.user = LOGIN_ID;
     return res.json({ success: true });
   }
   res.json({ success: false });
 });
 
+/* ===== LOGOUT ===== */
 app.post("/logout", (req, res) => {
   req.session.destroy(() => res.json({ success: true }));
 });
 
-/* PAGES */
+/* ===== PAGES ===== */
 app.get("/", (req, res) =>
   res.sendFile(path.join(__dirname, "public/login.html"))
 );
+
 app.get("/launcher", auth, (req, res) =>
   res.sendFile(path.join(__dirname, "public/launcher.html"))
 );
 
-/* UTILS */
+/* ===== UTILS ===== */
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
 function createTransporter(email, appPassword) {
   return nodemailer.createTransport({
     service: "gmail",
@@ -59,21 +64,22 @@ function createTransporter(email, appPassword) {
   });
 }
 
-/* SPEED (SAME) */
-async function runControlled(list, workers, handler) {
+/* ===== PARALLEL WORKERS (FAST) ===== */
+async function runParallel(list, workers, handler) {
   const buckets = Array.from({ length: workers }, () => []);
   list.forEach((item, i) => buckets[i % workers].push(item));
+
   await Promise.all(
     buckets.map(async bucket => {
       for (const item of bucket) {
         await handler(item);
-        await sleep(300);
+        await sleep(60); // tiny pause (stable + fast)
       }
     })
   );
 }
 
-/* SEND (FOOTER ONLY – SAME) */
+/* ===== SEND MAIL ===== */
 app.post("/send", auth, async (req, res) => {
   try {
     const { senderName, email, password, recipients, subject, message } = req.body;
@@ -84,38 +90,39 @@ app.post("/send", auth, async (req, res) => {
       .filter(v => v.includes("@"));
 
     const transporter = createTransporter(email, password);
-    let sent = 0;
 
-    await runControlled(list, 3, async (to) => {
-      try {
-        const body =
+    /* template + 2 line gap + footer */
+    const mailBody =
 `${message}
 
-📩 Scanned & 𝚂𝚎𝚌𝚞𝚛𝚎𝚍— www.avast.com`;
+    
+📩 Scanned & Secured — www.avast.com`;
 
+    let sent = 0;
+
+    await runParallel(list, 5, async (to) => {
+      try {
         await transporter.sendMail({
           from: `${senderName || "User"} <${email}>`,
           to,
           subject: subject || "",
-          text: body,
-          headers: {
-            "Message-ID": `<${crypto.randomUUID()}@${email.split("@")[1]}>`,
-            "Date": new Date().toUTCString(),
-            "MIME-Version": "1.0",
-            "List-Unsubscribe": `<mailto:${email}?subject=unsubscribe>`
-          }
+          text: mailBody
         });
-
         sent++;
       } catch {}
     });
 
-    res.json({ success: true, message: `Mail Sent ✔ (${sent}/${list.length})` });
+    res.json({
+      success: true,
+      message: `Mail Sent ✔ (${sent}/${list.length})`
+    });
+
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
 });
 
+/* ===== START ===== */
 app.listen(PORT, () => {
-  console.log("Clean & Safe Mailer running on port " + PORT);
+  console.log("Fast clean mail server running on port " + PORT);
 });
