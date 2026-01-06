@@ -1,128 +1,119 @@
-const express = require("express");
-const session = require("express-session");
-const nodemailer = require("nodemailer");
-const bodyParser = require("body-parser");
-const path = require("path");
+import express from "express";
+import nodemailer from "nodemailer";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT || 8080;
-
-/* ===== LOGIN ===== */
-const LOGIN_ID = "yatendrakumar882";
-const LOGIN_PASS = "yatendrakumar882";
-
-/* ===== MIDDLEWARE ===== */
-app.use(bodyParser.json());
+app.use(express.json({ limit: "100kb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
-app.use(
-  session({
-    secret: "fast-clean-session",
-    resave: false,
-    saveUninitialized: true,
-    cookie: { maxAge: 60 * 60 * 1000 }
-  })
-);
+/* ROOT */
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "login.html"));
+});
 
-/* ===== AUTH ===== */
-function auth(req, res, next) {
-  if (req.session.user) return next();
-  return res.redirect("/");
+/* SAME SPEED & LIMIT */
+const HOURLY_LIMIT = 28;
+const PARALLEL = 3;
+const DELAY_MS = 120;
+
+/* IN-MEMORY STATS */
+let stats = {};
+
+/* 🔁 AUTO RESET EVERY 1 HOUR (FULL CLEAR) */
+setInterval(() => {
+  stats = {};
+  console.log("🧹 Hourly reset → mail history cleared");
+}, 60 * 60 * 1000);
+
+/* SAFE SEND (SAME SPEED) */
+async function sendSafely(transporter, mails) {
+  let sent = 0;
+  for (let i = 0; i < mails.length; i += PARALLEL) {
+    const batch = mails.slice(i, i + PARALLEL);
+    const results = await Promise.allSettled(
+      batch.map(m => transporter.sendMail(m))
+    );
+    results.forEach(r => { if (r.status === "fulfilled") sent++; });
+    await new Promise(r => setTimeout(r, DELAY_MS));
+  }
+  return sent;
 }
 
-/* ===== LOGIN ===== */
-app.post("/login", (req, res) => {
-  const { username, password } = req.body;
-  if (username === LOGIN_ID && password === LOGIN_PASS) {
-    req.session.user = LOGIN_ID;
-    return res.json({ success: true });
+/* SEND API */
+app.post("/send", async (req, res) => {
+  const { senderName, gmail, apppass, to, subject, message } = req.body;
+
+  if (!gmail || !apppass || !to || !subject || !message) {
+    return res.json({ success: false, msg: "Missing Fields ❌", count: 0 });
   }
-  res.json({ success: false });
-});
 
-/* ===== LOGOUT ===== */
-app.post("/logout", (req, res) => {
-  req.session.destroy(() => res.json({ success: true }));
-});
+  if (!stats[gmail]) stats[gmail] = { count: 0 };
+  if (stats[gmail].count >= HOURLY_LIMIT) {
+    return res.json({
+      success: false,
+      msg: "Hourly Limit Reached ❌",
+      count: stats[gmail].count
+    });
+  }
 
-/* ===== PAGES ===== */
-app.get("/", (req, res) =>
-  res.sendFile(path.join(__dirname, "public/login.html"))
-);
+  const recipients = to
+    .split(/,|\r?\n/)
+    .map(r => r.trim())
+    .filter(r => r.includes("@"));
 
-app.get("/launcher", auth, (req, res) =>
-  res.sendFile(path.join(__dirname, "public/launcher.html"))
-);
+  const remaining = HOURLY_LIMIT - stats[gmail].count;
+  if (recipients.length > remaining) {
+    return res.json({
+      success: false,
+      msg: "Mail Limit Full ❌",
+      count: stats[gmail].count
+    });
+  }
 
-/* ===== UTILS ===== */
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+  /* CLEAN MESSAGE */
+  const cleanMessage = message.replace(/\s{3,}/g, "\n\n").trim();
+  const finalText = cleanMessage + "\n\nScanned & Secured — www.avast.com";
 
-function createTransporter(email, appPassword) {
-  return nodemailer.createTransport({
-    service: "gmail",
-    auth: { user: email, pass: appPassword }
+  const transporter = nodemailer.createTransport({
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
+    auth: { user: gmail, pass: apppass }
   });
-}
 
-/* ===== PARALLEL WORKERS (FAST) ===== */
-async function runParallel(list, workers, handler) {
-  const buckets = Array.from({ length: workers }, () => []);
-  list.forEach((item, i) => buckets[i % workers].push(item));
-
-  await Promise.all(
-    buckets.map(async bucket => {
-      for (const item of bucket) {
-        await handler(item);
-        await sleep(60); // tiny pause (stable + fast)
-      }
-    })
-  );
-}
-
-/* ===== SEND MAIL ===== */
-app.post("/send", auth, async (req, res) => {
   try {
-    const { senderName, email, password, recipients, subject, message } = req.body;
-
-    const list = recipients
-      .split(/[\n,]+/)
-      .map(v => v.trim())
-      .filter(v => v.includes("@"));
-
-    const transporter = createTransporter(email, password);
-
-    /* template + 2 line gap + footer */
-    const mailBody =
-`${message}
-
-    
-📩 Scanned & Secured — www.avast.com`;
-
-    let sent = 0;
-
-    await runParallel(list, 5, async (to) => {
-      try {
-        await transporter.sendMail({
-          from: `${senderName || "User"} <${email}>`,
-          to,
-          subject: subject || "",
-          text: mailBody
-        });
-        sent++;
-      } catch {}
+    await transporter.verify();
+  } catch {
+    return res.json({
+      success: false,
+      msg: "Wrong App Password ❌",
+      count: stats[gmail].count
     });
-
-    res.json({
-      success: true,
-      message: `Mail Sent ✔ (${sent}/${list.length})`
-    });
-
-  } catch (err) {
-    res.json({ success: false, message: err.message });
   }
+
+  const mails = recipients.map(r => ({
+    from: `"${senderName}" <${gmail}>`,
+    to: r,
+    subject: subject.trim(),
+    text: finalText,
+    replyTo: gmail
+  }));
+
+  const sentCount = await sendSafely(transporter, mails);
+  stats[gmail].count += sentCount;
+
+  return res.json({
+    success: true,
+    sent: sentCount,
+    count: stats[gmail].count
+  });
 });
 
-/* ===== START ===== */
-app.listen(PORT, () => {
-  console.log("Fast clean mail server running on port " + PORT);
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () =>
+  console.log("✅ Safe Mail Server running on port", PORT)
+);
